@@ -1,0 +1,1051 @@
+--[[
+	Kytariss Admin Panel — v15.11 (All-in-One, Client-only)
+	Hint "Press Insert" + DisplayOrder fix + Unlock souris (L)
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+
+local lp = Players.LocalPlayer
+local cam = workspace.CurrentCamera
+
+-- ================= CONFIG =================
+local MIN_SMOOTH, MAX_SMOOTH = 0, 60
+local SMOOTH = 0
+
+local MIN_FOV, MAX_FOV = 20, 400
+local FOV_RADIUS = 150
+
+local MIN_BOX, MAX_BOX = 40, 100
+local BOX_RATIO = 0.7
+
+local MIN_HP, MAX_HP = 20, 200
+local HP_SCALE = 100
+
+local MIN_SPIN, MAX_SPIN = 1, 40
+local SPIN_SPEED = 8
+local spinning = false
+
+local MIN_LOOK, MAX_LOOK = 0, 60
+local LOOK_ANGLE = 0
+
+local holdLocking = false
+local bunnyHop = false
+local boxOn = true
+local healthOn = true
+
+-- [NEW] Unlock souris
+local mouseUnlocked = false
+local savedMouseBehavior = nil
+local savedMouseIcon = nil
+
+local COLORS = {
+	Color3.fromRGB(255, 60, 60), Color3.fromRGB(60, 255, 110),
+	Color3.fromRGB(60, 190, 255), Color3.fromRGB(255, 225, 60), Color3.new(1, 1, 1),
+}
+-- ==========================================
+
+local colorIndex, highlightOn, target, look = 1, true, nil, nil
+local highlights, labels, boxes = {}, {}, {}
+local healthbars = {}
+local refreshUI = function() end
+local updateFovCircle = function() end
+local rememberedTarget = nil
+local holdMissingTime = 0
+
+-- ============ HELPERS ============
+local function head(p)
+	local c = p and p.Character
+	local hum = c and c:FindFirstChildOfClass("Humanoid")
+	if hum and hum.Health > 0 then return c:FindFirstChild("Head") end
+end
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+
+local function isVisible(p)
+	local h = head(p)
+	if not h then return false end
+	local origin = cam.CFrame.Position
+	local dir = h.Position - origin
+	local filter = {}
+	if lp.Character then table.insert(filter, lp.Character) end
+	if p.Character then table.insert(filter, p.Character) end
+	rayParams.FilterDescendantsInstances = filter
+	local hit = workspace:Raycast(origin, dir, rayParams)
+	return hit == nil
+end
+
+local function isAliveOther(p)
+	if p == lp then return false end
+	if not head(p) then return false end
+	return true
+end
+
+local function isValidESP(p) return isAliveOther(p) end
+local function isValidLock(p) return isAliveOther(p) end
+
+local function isVisibleForLock(p)
+	if not isValidLock(p) then return false end
+	if not isVisible(p) then return false end
+	return true
+end
+
+local function inFOV(h)
+	if not h then return false end
+	local vp = cam.ViewportSize
+	if vp.X == 0 or vp.Y == 0 then return false end
+	local center = Vector2.new(vp.X / 2, vp.Y / 2)
+	local pos, onScreen = cam:WorldToViewportPoint(h.Position)
+	if not onScreen then return false end
+	local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+	return d <= FOV_RADIUS
+end
+
+local function apply(p)
+	if not isValidESP(p) or not highlightOn or not p.Character then
+		if highlights[p] then highlights[p]:Destroy() highlights[p] = nil end
+		return
+	end
+	local h = highlights[p]
+	if not h or h.Parent ~= p.Character then
+		if h then h:Destroy() end
+		h = Instance.new("Highlight")
+		h.FillTransparency = 0.5
+		h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		h.Parent = p.Character
+		highlights[p] = h
+	end
+	h.FillColor = COLORS[colorIndex]
+end
+
+local function refresh()
+	for _, p in ipairs(Players:GetPlayers()) do pcall(apply, p) end
+end
+
+local function detachLabel(p)
+	if labels[p] then labels[p]:Destroy() labels[p] = nil end
+end
+
+local function attachLabel(p)
+	if not isValidESP(p) then detachLabel(p) return end
+	local h = head(p)
+	if not h then return end
+	detachLabel(p)
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "KytarissLabel"
+	bb.Size = UDim2.fromOffset(140, 30)
+	bb.StudsOffset = Vector3.new(0, 2.5, 0)
+	bb.AlwaysOnTop = true
+	bb.Parent = h
+	local txt = Instance.new("TextLabel")
+	txt.Name = "Dist"
+	txt.Size = UDim2.fromScale(1, 1)
+	txt.BackgroundTransparency = 1
+	txt.TextColor3 = Color3.new(1, 1, 1)
+	txt.TextStrokeTransparency = 0
+	txt.Font = Enum.Font.GothamBold
+	txt.TextScaled = true
+	txt.Text = p.DisplayName
+	txt.Parent = bb
+	labels[p] = bb
+end
+
+-- ============ BOX ESP ============
+local boxGui = Instance.new("ScreenGui")
+boxGui.Name = "KytarissBoxes"
+boxGui.ResetOnSpawn = false
+boxGui.IgnoreGuiInset = true
+boxGui.DisplayOrder = 999998
+boxGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+boxGui.Parent = lp:WaitForChild("PlayerGui")
+
+local function detachBox(p)
+	if boxes[p] then boxes[p]:Destroy() boxes[p] = nil end
+end
+
+local function attachBox(p)
+	detachBox(p)
+	if not isValidESP(p) or not boxOn or not p.Character then return end
+	local frame = Instance.new("Frame")
+	frame.Name = "Box_" .. p.Name
+	frame.AnchorPoint = Vector2.new(0.5, 0.5)
+	frame.BackgroundTransparency = 1
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.Parent = boxGui
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = COLORS[colorIndex]
+	stroke.Thickness = 1.5
+	stroke.Transparency = 0.15
+	stroke.Parent = frame
+	boxes[p] = frame
+end
+
+local function refreshBoxes()
+	for _, p in ipairs(Players:GetPlayers()) do
+		pcall(attachBox, p)
+	end
+end
+-- ==========================================
+
+-- ============ HEALTHBAR ============
+local healthGui = Instance.new("ScreenGui")
+healthGui.Name = "KytarissHealth"
+healthGui.ResetOnSpawn = false
+healthGui.IgnoreGuiInset = true
+healthGui.DisplayOrder = 999997
+healthGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+healthGui.Parent = lp:WaitForChild("PlayerGui")
+
+local function detachHealth(p)
+	if healthbars[p] then healthbars[p]:Destroy() healthbars[p] = nil end
+end
+
+local function attachHealth(p)
+	detachHealth(p)
+	if not isValidESP(p) or not healthOn or not p.Character then return end
+
+	local container = Instance.new("Frame")
+	container.Name = "HP_" .. p.Name
+	container.AnchorPoint = Vector2.new(0, 0)
+	container.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+	container.BackgroundTransparency = 0.15
+	container.BorderSizePixel = 0
+	container.Visible = false
+	container.Parent = healthGui
+	Instance.new("UICorner", container).CornerRadius = UDim.new(0, 2)
+
+	local stroke = Instance.new("UIStroke", container)
+	stroke.Color = Color3.fromRGB(0, 0, 0)
+	stroke.Thickness = 1
+	stroke.Transparency = 0.3
+
+	local fill = Instance.new("Frame")
+	fill.Name = "Fill"
+	fill.AnchorPoint = Vector2.new(0, 0)
+	fill.Position = UDim2.new(0, 0, 0, 0)
+	fill.Size = UDim2.new(1, 0, 1, 0)
+	fill.BackgroundColor3 = Color3.fromRGB(60, 255, 110)
+	fill.BorderSizePixel = 0
+	fill.Parent = container
+	Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 2)
+
+	healthbars[p] = container
+end
+
+local function refreshHealth()
+	for _, p in ipairs(Players:GetPlayers()) do
+		pcall(attachHealth, p)
+	end
+end
+-- ==========================================
+
+-- ============ UNLOCK MOUSE (NEW) ============
+local function unlockMouse()
+	if mouseUnlocked then return end
+	mouseUnlocked = true
+	savedMouseBehavior = UIS.MouseBehavior
+	savedMouseIcon = UIS.MouseIconEnabled
+
+	UIS.MouseBehavior = Enum.MouseBehavior.Default
+	UIS.MouseIconEnabled = true
+	refreshUI()
+end
+
+local function lockMouse()
+	if not mouseUnlocked then return end
+	mouseUnlocked = false
+
+	-- Restaure le comportement original (généralement LockCenter en FPS)
+	if savedMouseBehavior then
+		UIS.MouseBehavior = savedMouseBehavior
+	else
+		UIS.MouseBehavior = Enum.MouseBehavior.Default
+	end
+	if savedMouseIcon ~= nil then
+		UIS.MouseIconEnabled = savedMouseIcon
+	end
+	savedMouseBehavior = nil
+	savedMouseIcon = nil
+	refreshUI()
+end
+
+local function toggleMouse()
+	if mouseUnlocked then lockMouse() else unlockMouse() end
+end
+-- ==========================================
+
+local function others()
+	local list = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if isAliveOther(p) then table.insert(list, p) end
+	end
+	table.sort(list, function(a, b) return a.Name < b.Name end)
+	return list
+end
+
+local function closest()
+	local vp = cam.ViewportSize
+	if vp.X == 0 or vp.Y == 0 then return nil end
+	local center = Vector2.new(vp.X / 2, vp.Y / 2)
+	local best, bestD = nil, math.huge
+	for _, p in ipairs(others()) do
+		if isVisibleForLock(p) then
+			local h = head(p)
+			local pos, onScreen = cam:WorldToViewportPoint(h.Position)
+			if onScreen then
+				local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+				if d <= FOV_RADIUS and d < bestD then
+					best, bestD = p, d
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function setTarget(p)
+	target = p
+	look = p and cam.CFrame.LookVector or nil
+	refreshUI()
+end
+
+local function cycle(dir)
+	local list = others()
+	if #list == 0 then return setTarget(nil) end
+	local i = table.find(list, target)
+	if not i then return setTarget(list[1]) end
+	setTarget(list[((i - 1 + dir) % #list) + 1])
+end
+
+local function toggleLock()
+	if target then setTarget(nil) else setTarget(closest()) end
+end
+
+-- ============ SPIN BOT ============
+local spinConnection = nil
+
+local function stopSpinBot()
+	spinning = false
+	if spinConnection then spinConnection:Disconnect() spinConnection = nil end
+	refreshUI()
+end
+
+local function startSpinBot()
+	if spinning then return end
+	spinning = true
+	spinConnection = RunService.RenderStepped:Connect(function(dt)
+		local char = lp.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return stopSpinBot() end
+		local angle = math.rad(SPIN_SPEED * 60 * dt)
+		hrp.CFrame = hrp.CFrame * CFrame.Angles(0, angle, 0)
+	end)
+	refreshUI()
+end
+
+local function setSpinBot(on)
+	if on then startSpinBot() else stopSpinBot() end
+end
+
+-- ============ BUNNY HOP ============
+local bunnyHopActive = false
+local bunnyConn = nil
+
+local function stopBunny()
+	bunnyHopActive = false
+	if bunnyConn then bunnyConn:Disconnect() bunnyConn = nil end
+end
+
+local function startBunny()
+	if bunnyHopActive then return end
+	bunnyHopActive = true
+	bunnyConn = RunService.Heartbeat:Connect(function()
+		local char = lp.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hum then return stopBunny() end
+		if hum.FloorMaterial ~= Enum.Material.Air then
+			hum.Jump = true
+		end
+	end)
+end
+
+-- ============ ANTI-AIM ============
+local savedNeckC0 = nil
+
+local function applyLookUp()
+	local char = lp.Character
+	local neck = char and char:FindFirstChild("Neck", true)
+	if not neck or not neck:IsA("Motor6D") then return end
+	if not savedNeckC0 then savedNeckC0 = neck.C0 end
+	local tilt = math.rad(LOOK_ANGLE)
+	neck.C0 = savedNeckC0 * CFrame.Angles(tilt, 0, 0)
+end
+
+RunService.RenderStepped:Connect(applyLookUp)
+
+lp.CharacterAdded:Connect(function()
+	savedNeckC0 = nil
+	stopBunny()
+end)
+
+-- ============ RENDER ============
+RunService:BindToRenderStep("KytarissLock", Enum.RenderPriority.Camera.Value + 1, function(dt)
+	for p, bb in pairs(labels) do
+		if not isValidESP(p) then
+			detachLabel(p)
+		else
+			local h = head(p)
+			if h then
+				local txt = bb:FindFirstChild("Dist")
+				if txt then
+					local d = (h.Position - cam.CFrame.Position).Magnitude
+					txt.Text = string.format("%s [%d]", p.DisplayName, math.floor(d))
+				end
+			else
+				detachLabel(p)
+			end
+		end
+	end
+
+	if boxOn then
+		for p, frame in pairs(boxes) do
+			local char = p.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			local h = head(p)
+			if not isValidESP(p) or not hrp or not h then
+				frame.Visible = false
+			else
+				local topWorld = h.Position + Vector3.new(0, 0.5, 0)
+				local bottomWorld = hrp.Position - Vector3.new(0, 3, 0)
+				local topScreen, topOn = cam:WorldToViewportPoint(topWorld)
+				local botScreen, botOn = cam:WorldToViewportPoint(bottomWorld)
+				if topOn and botOn then
+					local height = math.abs(botScreen.Y - topScreen.Y)
+					local width = height * BOX_RATIO
+					local cx = (topScreen.X + botScreen.X) / 2
+					local cy = (topScreen.Y + botScreen.Y) / 2
+					frame.Position = UDim2.fromOffset(cx, cy)
+					frame.Size = UDim2.fromOffset(width, height)
+					frame.Visible = true
+				else
+					frame.Visible = false
+				end
+			end
+		end
+	else
+		for _, frame in pairs(boxes) do
+			frame.Visible = false
+		end
+	end
+
+	-- HEALTHBAR verticale à droite
+	if healthOn then
+		for p, container in pairs(healthbars) do
+			local char = p.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local h = head(p)
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			if not isValidESP(p) or not hum or not h or not hrp then
+				container.Visible = false
+			else
+				local topWorld = h.Position + Vector3.new(0, 0.5, 0)
+				local bottomWorld = hrp.Position - Vector3.new(0, 3, 0)
+				local topScreen, topOn = cam:WorldToViewportPoint(topWorld)
+				local botScreen, botOn = cam:WorldToViewportPoint(bottomWorld)
+				if topOn and botOn then
+					local boxHeight = math.abs(botScreen.Y - topScreen.Y)
+					local boxWidth = boxHeight * BOX_RATIO
+					local cx = (topScreen.X + botScreen.X) / 2
+					local topY = math.min(topScreen.Y, botScreen.Y)
+
+					local barW = 4 * (HP_SCALE / 100)
+					local barH = boxHeight
+
+					local gap = 4
+					local barX = cx + (boxWidth / 2) + gap
+					local barY = topY
+
+					container.Position = UDim2.fromOffset(barX, barY)
+					container.Size = UDim2.fromOffset(barW, barH)
+					container.Visible = true
+
+					local pct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+					local fill = container:FindFirstChild("Fill")
+					if fill then
+						fill.Size = UDim2.new(1, 0, pct, 0)
+						fill.Position = UDim2.new(0, 0, 0, 0)
+						fill.BackgroundColor3 = Color3.new(1 - pct, pct, 0.2)
+					end
+				else
+					container.Visible = false
+				end
+			end
+		end
+	else
+		for _, c in pairs(healthbars) do c.Visible = false end
+	end
+
+	-- HOLD-LOCK
+	if holdLocking then
+		if not target then
+			local p = closest()
+			if p then
+				rememberedTarget = p
+				setTarget(p)
+			end
+		end
+
+		if target then
+			local h = head(target)
+			if not h then
+				holdMissingTime = holdMissingTime + dt
+				if holdMissingTime > 0.8 then
+					rememberedTarget = nil
+					holdMissingTime = 0
+					setTarget(nil)
+					local p = closest()
+					if p then
+						rememberedTarget = p
+						setTarget(p)
+					end
+				end
+			else
+				holdMissingTime = 0
+				local pos = cam.CFrame.Position
+				local alpha = SMOOTH > 0 and (1 - math.exp(-SMOOTH * dt)) or 1
+				look = look:Lerp((h.Position - pos).Unit, alpha).Unit
+				cam.CFrame = CFrame.lookAt(pos, pos + look)
+			end
+		end
+		return
+	end
+
+	-- LOCK NORMAL
+	if not target then return end
+
+	if not isVisibleForLock(target) then
+		setTarget(nil)
+		return
+	end
+
+	local h = head(target)
+	if not h then setTarget(nil) return end
+	if not inFOV(h) then
+		setTarget(nil)
+		return
+	end
+
+	local pos = cam.CFrame.Position
+	local alpha = SMOOTH > 0 and (1 - math.exp(-SMOOTH * dt)) or 1
+	look = look:Lerp((h.Position - pos).Unit, alpha).Unit
+	cam.CFrame = CFrame.lookAt(pos, pos + look)
+end)
+
+-- ============ LIFECYCLE ============
+local function hookPlayer(p)
+	local function onChar()
+		task.wait(0.1)
+		if p == lp then
+			stopSpinBot()
+			stopBunny()
+			savedNeckC0 = nil
+		end
+		apply(p)
+		attachLabel(p)
+		if boxOn then attachBox(p) end
+		if healthOn then attachHealth(p) end
+		local hum = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+		if hum and p == lp then
+			hum.Died:Connect(function()
+				stopSpinBot()
+				stopBunny()
+			end)
+		end
+	end
+	if p.Character then task.spawn(onChar) end
+	p.CharacterAdded:Connect(onChar)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do hookPlayer(p) end
+Players.PlayerAdded:Connect(hookPlayer)
+Players.PlayerRemoving:Connect(function(p)
+	if highlights[p] then highlights[p]:Destroy() highlights[p] = nil end
+	detachLabel(p)
+	detachBox(p)
+	detachHealth(p)
+	if p == target then setTarget(nil) end
+	if p == rememberedTarget then rememberedTarget = nil end
+end)
+
+-- ============================================================
+-- UI
+-- ============================================================
+local THEME = {
+	bg      = Color3.fromRGB(18, 18, 24),
+	bg2     = Color3.fromRGB(28, 28, 38),
+	accent  = Color3.fromRGB(140, 100, 255),
+	accent2 = Color3.fromRGB(255, 90, 180),
+	accent3 = Color3.fromRGB(80, 200, 255),
+	accent4 = Color3.fromRGB(80, 200, 140),
+	accent5 = Color3.fromRGB(255, 200, 80),
+	accent6 = Color3.fromRGB(255, 120, 60),
+	accent7 = Color3.fromRGB(120, 255, 180), -- [NEW] couleur unlock souris
+	text    = Color3.fromRGB(235, 235, 245),
+	textDim = Color3.fromRGB(150, 150, 170),
+	off     = Color3.fromRGB(40, 40, 52),
+}
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "KytarissAdminPanel"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.DisplayOrder = 999999
+gui.IgnoreGuiInset = true
+gui.Parent = lp:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromOffset(270, 900)
+frame.Position = UDim2.new(0, 20, 0.5, -450)
+frame.BackgroundColor3 = THEME.bg
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = gui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 14)
+
+local stroke = Instance.new("UIStroke", frame)
+stroke.Color = THEME.accent
+stroke.Thickness = 1.5
+stroke.Transparency = 0.3
+
+-- Hint "Press insert"
+local hint = Instance.new("TextLabel")
+hint.Name = "KytarissHint"
+hint.Size = UDim2.fromOffset(280, 24)
+hint.Position = UDim2.new(0, 20, 0.5, 460)
+hint.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+hint.BackgroundTransparency = 0.25
+hint.BorderSizePixel = 0
+hint.Text = "Insert: menu  |  L: unlock mouse"
+hint.Font = Enum.Font.GothamMedium
+hint.TextSize = 12
+hint.TextColor3 = Color3.fromRGB(170, 140, 255)
+hint.Parent = gui
+Instance.new("UICorner", hint).CornerRadius = UDim.new(0, 8)
+local hintStroke = Instance.new("UIStroke", hint)
+hintStroke.Color = Color3.fromRGB(120, 90, 255)
+hintStroke.Thickness = 1
+hintStroke.Transparency = 0.4
+
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 40)
+header.BackgroundColor3 = THEME.bg2
+header.BorderSizePixel = 0
+header.Parent = frame
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 14)
+
+local headerFix = Instance.new("Frame")
+headerFix.Size = UDim2.new(1, 0, 0, 14)
+headerFix.Position = UDim2.new(0, 0, 1, -14)
+headerFix.BackgroundColor3 = THEME.bg2
+headerFix.BorderSizePixel = 0
+headerFix.ZIndex = 1
+headerFix.Parent = header
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 1, 0)
+title.Position = UDim2.new(0, 14, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "Kytariss Admin Panel"
+title.Font = Enum.Font.GothamBold
+title.TextSize = 16
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.TextColor3 = THEME.text
+title.ZIndex = 2
+title.Parent = header
+
+local dot = Instance.new("Frame")
+dot.Size = UDim2.fromOffset(8, 8)
+dot.Position = UDim2.new(1, -22, 0.5, -4)
+dot.BackgroundColor3 = THEME.accent
+dot.BorderSizePixel = 0
+dot.ZIndex = 2
+dot.Parent = header
+Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+local divider = Instance.new("Frame")
+divider.Size = UDim2.new(1, -20, 0, 1)
+divider.Position = UDim2.new(0, 10, 0, 40)
+divider.BackgroundColor3 = THEME.off
+divider.BorderSizePixel = 0
+divider.Parent = frame
+
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -20, 1, -55)
+content.Position = UDim2.new(0, 10, 0, 48)
+content.BackgroundTransparency = 1
+content.Parent = frame
+
+local layout = Instance.new("UIListLayout", content)
+layout.Padding = UDim.new(0, 8)
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function makeButton(order, text)
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(1, 0, 0, 32)
+	btn.LayoutOrder = order
+	btn.BackgroundColor3 = THEME.off
+	btn.BorderSizePixel = 0
+	btn.Text = text
+	btn.Font = Enum.Font.GothamMedium
+	btn.TextSize = 13
+	btn.TextColor3 = THEME.text
+	btn.AutoButtonColor = true
+	btn.Parent = content
+	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+	local s = Instance.new("UIStroke", btn)
+	s.Color = Color3.fromRGB(70, 70, 95)
+	s.Thickness = 1
+	s.Transparency = 0.5
+	return btn
+end
+
+local function makeSlider(order, labelText, note, min, max, initial, accentColor, onChanged)
+	local wrap = Instance.new("Frame")
+	wrap.Size = UDim2.new(1, 0, 0, note and 52 or 40)
+	wrap.LayoutOrder = order
+	wrap.BackgroundTransparency = 1
+	wrap.Parent = content
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, 0, 0, 16)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = labelText .. ": " .. initial
+	lbl.Font = Enum.Font.GothamMedium
+	lbl.TextSize = 12
+	lbl.TextColor3 = THEME.textDim
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.Parent = wrap
+
+	if note then
+		local noteLbl = Instance.new("TextLabel")
+		noteLbl.Size = UDim2.new(1, 0, 0, 12)
+		noteLbl.Position = UDim2.new(0, 0, 0, 16)
+		noteLbl.BackgroundTransparency = 1
+		noteLbl.Text = note
+		noteLbl.Font = Enum.Font.Gotham
+		noteLbl.TextSize = 10
+		noteLbl.TextColor3 = Color3.fromRGB(110, 110, 130)
+		noteLbl.TextXAlignment = Enum.TextXAlignment.Left
+		noteLbl.Parent = wrap
+	end
+
+	local slider = Instance.new("TextButton")
+	slider.Size = UDim2.new(1, 0, 0, 20)
+	slider.Position = UDim2.new(0, 0, 0, note and 30 or 18)
+	slider.BackgroundTransparency = 1
+	slider.Text = ""
+	slider.AutoButtonColor = false
+	slider.Parent = wrap
+
+	local track = Instance.new("Frame")
+	track.Size = UDim2.new(1, 0, 0, 4)
+	track.Position = UDim2.new(0, 0, 0.5, -2)
+	track.BackgroundColor3 = THEME.bg2
+	track.BorderSizePixel = 0
+	track.Parent = slider
+	Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+	local fill = Instance.new("Frame")
+	fill.Size = UDim2.new((initial - min) / (max - min), 0, 1, 0)
+	fill.BackgroundColor3 = accentColor
+	fill.BorderSizePixel = 0
+	fill.Parent = track
+	Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+	local knob = Instance.new("Frame")
+	knob.Size = UDim2.fromOffset(14, 14)
+	knob.AnchorPoint = Vector2.new(0.5, 0.5)
+	knob.Position = UDim2.new((initial - min) / (max - min), 0, 0.5, 0)
+	knob.BackgroundColor3 = Color3.new(1, 1, 1)
+	knob.BorderSizePixel = 0
+	knob.Parent = slider
+	Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+	local knobStroke = Instance.new("UIStroke", knob)
+	knobStroke.Color = accentColor
+	knobStroke.Thickness = 2
+
+	local dragging = false
+
+	local function updateFromX(x)
+		local absX = slider.AbsolutePosition.X
+		local width = slider.AbsoluteSize.X
+		local t = math.clamp((x - absX) / width, 0, 1)
+		local value = math.floor(min + t * (max - min) + 0.5)
+		fill.Size = UDim2.new(t, 0, 1, 0)
+		knob.Position = UDim2.new(t, 0, 0.5, 0)
+		lbl.Text = labelText .. ": " .. value
+		onChanged(value)
+	end
+
+	slider.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			updateFromX(input.Position.X)
+		end
+	end)
+
+	UIS.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch) then
+			updateFromX(input.Position.X)
+		end
+	end)
+
+	UIS.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	return {
+		setValue = function(v)
+			local t = math.clamp((v - min) / (max - min), 0, 1)
+			fill.Size = UDim2.new(t, 0, 1, 0)
+			knob.Position = UDim2.new(t, 0, 0.5, 0)
+			lbl.Text = labelText .. ": " .. v
+		end
+	}
+end
+
+-- widgets
+local hlBtn     = makeButton(1, "")
+local lockBtn   = makeButton(2, "")
+local colBtn    = makeButton(3, "Change color")
+local boxBtn    = makeButton(4, "")
+local healthBtn = makeButton(5, "")
+local spinBtn   = makeButton(6, "")
+local bunnyBtn  = makeButton(7, "")
+local mouseBtn  = makeButton(8, "") -- [NEW]
+
+local boxWidthSlider = makeSlider(9, "Box width", nil,
+	MIN_BOX, MAX_BOX, math.floor(BOX_RATIO * 100),
+	THEME.accent3, function(v) BOX_RATIO = v / 100 end)
+
+local hpSizeSlider = makeSlider(10, "Healthbar size", nil,
+	MIN_HP, MAX_HP, HP_SCALE,
+	THEME.accent6, function(v) HP_SCALE = v end)
+
+local smoothSlider = makeSlider(11, "Smoothness", nil,
+	MIN_SMOOTH, MAX_SMOOTH, SMOOTH,
+	THEME.accent, function(v) SMOOTH = v end)
+
+local fovSlider = makeSlider(12, "FOV circle", nil,
+	MIN_FOV, MAX_FOV, FOV_RADIUS,
+	THEME.accent, function(v)
+		FOV_RADIUS = v
+		updateFovCircle()
+	end)
+
+local spinSlider = makeSlider(13, "Spin speed", "ONLY WORK IN THIRD PERSON VIEW",
+	MIN_SPIN, MAX_SPIN, SPIN_SPEED,
+	THEME.accent2, function(v) SPIN_SPEED = v end)
+
+local lookSlider = makeSlider(14, "Anti-aim (look UP)", "ONLY WORK IN THIRD PERSON VIEW",
+	MIN_LOOK, MAX_LOOK, LOOK_ANGLE,
+	THEME.accent3, function(v) LOOK_ANGLE = v end)
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, 0, 0, 20)
+status.LayoutOrder = 15
+status.BackgroundTransparency = 1
+status.Text = "No target"
+status.Font = Enum.Font.GothamMedium
+status.TextSize = 11
+status.TextColor3 = THEME.textDim
+status.Parent = content
+
+refreshUI = function()
+	hlBtn.Text = "Highlight: " .. (highlightOn and "ON" or "OFF")
+	hlBtn.BackgroundColor3 = highlightOn and THEME.accent or THEME.off
+	lockBtn.Text = "Lock-on: " .. (target and "ON" or "OFF")
+	lockBtn.BackgroundColor3 = target and THEME.accent or THEME.off
+	colBtn.BackgroundColor3 = COLORS[colorIndex]
+	colBtn.TextColor3 = Color3.new(0, 0, 0)
+	boxBtn.Text = "Box (B): " .. (boxOn and "ON" or "OFF")
+	boxBtn.BackgroundColor3 = boxOn and THEME.accent3 or THEME.off
+	healthBtn.Text = "Healthbar (H): " .. (healthOn and "ON" or "OFF")
+	healthBtn.BackgroundColor3 = healthOn and THEME.accent6 or THEME.off
+	spinBtn.Text = "Spin Bot: " .. (spinning and "ON" or "OFF")
+	spinBtn.BackgroundColor3 = spinning and THEME.accent2 or THEME.off
+	bunnyBtn.Text = "Bunny Hop: " .. (bunnyHop and "ON" or "OFF")
+	bunnyBtn.BackgroundColor3 = bunnyHop and THEME.accent5 or THEME.off
+	mouseBtn.Text = "Unlock Mouse (L): " .. (mouseUnlocked and "ON" or "OFF")
+	mouseBtn.BackgroundColor3 = mouseUnlocked and THEME.accent7 or THEME.off
+	status.Text = target and ("Target: " .. target.DisplayName .. "   [Q / E]") or "No target"
+end
+
+hlBtn.MouseButton1Click:Connect(function()
+	highlightOn = not highlightOn
+	refresh()
+	refreshUI()
+end)
+
+lockBtn.MouseButton1Click:Connect(toggleLock)
+
+colBtn.MouseButton1Click:Connect(function()
+	colorIndex = colorIndex % #COLORS + 1
+	refresh()
+	refreshBoxes()
+	refreshUI()
+end)
+
+boxBtn.MouseButton1Click:Connect(function()
+	boxOn = not boxOn
+	refreshBoxes()
+	refreshUI()
+end)
+
+healthBtn.MouseButton1Click:Connect(function()
+	healthOn = not healthOn
+	refreshHealth()
+	refreshUI()
+end)
+
+spinBtn.MouseButton1Click:Connect(function()
+	setSpinBot(not spinning)
+end)
+
+bunnyBtn.MouseButton1Click:Connect(function()
+	bunnyHop = not bunnyHop
+	if not bunnyHop then stopBunny() end
+	refreshUI()
+end)
+
+mouseBtn.MouseButton1Click:Connect(toggleMouse) -- [NEW]
+
+-- ============ FOV CIRCLE ============
+local fovGui = Instance.new("ScreenGui")
+fovGui.Name = "KytarissFOVCircle"
+fovGui.ResetOnSpawn = false
+fovGui.IgnoreGuiInset = true
+fovGui.DisplayOrder = 999996
+fovGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+fovGui.Parent = lp:WaitForChild("PlayerGui")
+
+local fovCircle = Instance.new("Frame")
+fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+fovCircle.Position = UDim2.fromScale(0.5, 0.5)
+fovCircle.Size = UDim2.fromOffset(FOV_RADIUS * 2, FOV_RADIUS * 2)
+fovCircle.BackgroundTransparency = 1
+fovCircle.Parent = fovGui
+
+Instance.new("UICorner", fovCircle).CornerRadius = UDim.new(1, 0)
+
+local circleStroke = Instance.new("UIStroke")
+circleStroke.Color = Color3.fromRGB(140, 100, 255)
+circleStroke.Thickness = 1.5
+circleStroke.Transparency = 0.3
+circleStroke.Parent = fovCircle
+
+updateFovCircle = function()
+	fovCircle.Size = UDim2.fromOffset(FOV_RADIUS * 2, FOV_RADIUS * 2)
+	fovCircle.Position = UDim2.fromScale(0.5, 0.5)
+end
+
+cam:GetPropertyChangedSignal("ViewportSize"):Connect(updateFovCircle)
+updateFovCircle()
+
+-- ============ KEYBINDS ============
+UIS.InputBegan:Connect(function(input, processed)
+	if processed then return end
+
+	-- [NEW] Bloque le hold-lock si on est en train de cliquer sur un bouton du panel
+	-- (évite de lock quand on clique sur les sliders/boutons)
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		-- Si la souris est unlocked et qu'on clique sur le panel, on skip
+		local mousePos = UIS:GetMouseLocation()
+		local guiPos = frame.AbsolutePosition
+		local guiSize = frame.AbsoluteSize
+		local overPanel = mousePos.X >= guiPos.X and mousePos.X <= guiPos.X + guiSize.X
+			and mousePos.Y >= guiPos.Y and mousePos.Y <= guiPos.Y + guiSize.Y
+		if mouseUnlocked and overPanel then return end
+
+		holdLocking = true
+		holdMissingTime = 0
+		if not target then
+			local p = closest()
+			if p then
+				rememberedTarget = p
+				setTarget(p)
+			end
+		end
+		return
+	end
+
+	local k = input.KeyCode
+
+	if k == Enum.KeyCode.Space and bunnyHop then
+		startBunny()
+	end
+
+	if k == Enum.KeyCode.T then toggleLock()
+	elseif k == Enum.KeyCode.E and target then cycle(1)
+	elseif k == Enum.KeyCode.Q and target then cycle(-1)
+	elseif k == Enum.KeyCode.B then
+		boxOn = not boxOn
+		refreshBoxes()
+		refreshUI()
+	elseif k == Enum.KeyCode.H then
+		healthOn = not healthOn
+		refreshHealth()
+		refreshUI()
+	elseif k == Enum.KeyCode.L then -- [NEW] toggle mouse
+		toggleMouse()
+	elseif k == Enum.KeyCode.G then setSpinBot(not spinning)
+	elseif k == Enum.KeyCode.Insert then
+		frame.Visible = not frame.Visible
+		hint.Visible = frame.Visible
+	elseif k == Enum.KeyCode.End then
+		gui.Enabled = not gui.Enabled
+		if not gui.Enabled then
+			setTarget(nil)
+			rememberedTarget = nil
+			holdMissingTime = 0
+			highlightOn = false
+			boxOn = false
+			healthOn = false
+			stopSpinBot()
+			stopBunny()
+			lockMouse() -- [NEW]
+			LOOK_ANGLE = 0
+			lookSlider.setValue(0)
+			refresh()
+			refreshBoxes()
+			refreshHealth()
+			refreshUI()
+		end
+	end
+end)
+
+UIS.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		holdLocking = false
+		rememberedTarget = nil
+		holdMissingTime = 0
+		if target then setTarget(nil) end
+	end
+	if input.KeyCode == Enum.KeyCode.Space then
+		stopBunny()
+	end
+end)
+
+refreshUI()
+print("[Kytariss Admin Panel v15.11] Loaded")
